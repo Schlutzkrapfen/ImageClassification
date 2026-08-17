@@ -44,5 +44,4 @@ with torch.no_grad():
     predicted_idx = torch.argmax(probs).item()
 
 print(f"Predicted class: {class_names[predicted_idx]}")
-print(f"Confidence: {probs[predicted_idx]*100:.1f}%"):w
-
+print(f"Confidence: {probs[predicted_idx]*100:.1f}%")
