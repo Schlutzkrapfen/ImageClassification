@@ -70,16 +70,42 @@ print(f"Classes found ({num_classes}): {class_names}")
 # ---------------------------------------------------------
 model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
 
-# Freeze the early layers (they already know how to detect shapes/edges)
+# Freeze all layers by default (they already know how to detect
+# general shapes/edges from ImageNet pretraining)
 for param in model.parameters():
     param.requires_grad = False
 
-# Replace only the final classification layer, which will be trained
-model.fc = nn.Linear(model.fc.in_features, num_classes)
+# Unfreeze the last convolutional block (layer4) so it can adapt
+# to features specific to your classes, not just generic ones
+for param in model.layer4.parameters():
+    param.requires_grad = True
+
+# Replace the final classification layer, which is always trained.
+# A dropout layer is added before it to reduce overfitting risk,
+# since we're now training more parameters (layer4 + fc) on a
+# relatively small dataset.
+model.fc = nn.Sequential(
+    nn.Dropout(0.3),
+    nn.Linear(model.fc.in_features, num_classes),
+)
 model = model.to(device)
 
 criterion = nn.CrossEntropyLoss()
-optimizer = Adam(model.fc.parameters(), lr=LEARNING_RATE)
+
+# Use a lower learning rate for the unfrozen pretrained layer4
+# (it's already fairly well-tuned, so we adjust it gently) and a
+# higher one for the brand-new final layer (which starts from
+# random weights and needs to learn faster)
+optimizer = Adam([
+    {"params": model.layer4.parameters(), "lr": LEARNING_RATE / 10},
+    {"params": model.fc.parameters(), "lr": LEARNING_RATE},
+])
+
+# Reduces the learning rate when validation accuracy stops improving,
+# which helps stabilize training once the model starts oscillating
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode="max", factor=0.5, patience=2
+)
 
 # ---------------------------------------------------------
 # 5. Training loop
@@ -97,6 +123,9 @@ def evaluate():
     return correct / total if total > 0 else 0.0
 
 
+best_val_acc = 0.0
+best_state = None
+
 for epoch in range(EPOCHS):
     model.train()
     running_loss = 0.0
@@ -113,15 +142,23 @@ for epoch in range(EPOCHS):
         running_loss += loss.item()
 
     val_acc = evaluate()
+    scheduler.step(val_acc)
     print(f"Epoch {epoch+1}/{EPOCHS} - loss: {running_loss/len(train_loader):.4f} "
           f"- validation accuracy: {val_acc*100:.1f}%")
 
+    # Keep track of the best model seen so far (avoids overfitting
+    # by not blindly saving whatever the last epoch produced)
+    if val_acc > best_val_acc:
+        best_val_acc = val_acc
+        best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        print(f"  -> New best model (accuracy: {best_val_acc*100:.1f}%)")
+
 # ---------------------------------------------------------
-# 6. Save the model
+# 6. Save the BEST model (not necessarily the last epoch)
 # ---------------------------------------------------------
 torch.save({
-    "model_state": model.state_dict(),
+    "model_state": best_state,
     "class_names": class_names,
 }, "model.pth")
 
-print("\nModel saved as 'model.pth'")
+print(f"\nBest model saved as 'model.pth' (validation accuracy: {best_val_acc*100:.1f}%)")
